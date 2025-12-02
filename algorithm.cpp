@@ -50,9 +50,11 @@ void SNO::run() {
         
         // Step 3: 潛力區域探索 (探索者)
         RegionSearch();
+        if (currentEvaluations >= maxEvaluations) break;
         
         // Step 4: 潛力點搜尋 (開發者)
         PointSearch();
+        if (currentEvaluations >= maxEvaluations) break;
         
         // Step 5: 群體數量調整
         PopulationAdjustment();
@@ -60,6 +62,9 @@ void SNO::run() {
         // 檢查是否達到最大評估次數
         if (currentEvaluations >= maxEvaluations) break;
     }
+    
+    // 換行輸出最終結果
+    cout << endl;
 }
 
 // ==================== Step 1: 初始化 ====================
@@ -71,6 +76,7 @@ void SNO::Initialization() {
     int nMiners = static_cast<int>(nSInit * nXRatio);
     
     // Step 2: Randomly initialize population s and x by using Eq. (3.1)
+    //S=探索者 X=開發者
     explorers.resize(nExplorers);
     for (int i = 0; i < nExplorers; i++) {
         explorers[i] = Solution(dimension);
@@ -103,13 +109,32 @@ void SNO::Initialization() {
     }
     
     // Step 5: Set N(R) = (√N(N) - 1)^2
-    // 實際的區域數量由參數 nRegion 決定
+    // 空間網是一個 W×W 的 2D 網格結構，其中 W = √N(N)
+    int gridWidth = static_cast<int>(sqrt(nNet));
+    
+    // 檢查 nNet 是否為完全平方數
+    if (gridWidth * gridWidth != nNet) {
+        cout << "警告: N(N)=" << nNet << " 不是完全平方數！調整為 " << gridWidth*gridWidth << endl;
+        nNet = gridWidth * gridWidth;
+        spaceNet.resize(nNet);
+        for (int i = 0; i < nNet; i++) {
+            spaceNet[i] = NetPoint(dimension);
+            for (int d = 0; d < dimension; d++) {
+                spaceNet[i].position[d] = randDouble(lowerBound[d], upperBound[d]);
+            }
+            spaceNet[i].fitness = evaluate(spaceNet[i].position);
+        }
+    }
+    
+    // 計算正確的區域數量：(W-1)²
+    // 每個區域由 4 個相鄰網點組成（2×2 的小格子）
+    int correctNRegion = (gridWidth - 1) * (gridWidth - 1);
     
     // Step 6-9: for i = 1 to N(R) do
     //   Set v_a = 1, v_b = 1
     //   Set m^c_i = m^c, m^f_i = m^f
-    regions.resize(nRegion);
-    for (int i = 0; i < nRegion; i++) {
+    regions.resize(correctNRegion);
+    for (int i = 0; i < correctNRegion; i++) {
         regions[i].id = i;
         regions[i].expectedValue = 1.0;      // 初始期望值
         regions[i].visitCount = 1;           // v_a = 1 (避免除以0)
@@ -121,13 +146,27 @@ void SNO::Initialization() {
         regions[i].meanC = mC;
     }
     
-    // 將空間網點分配到各區域（簡化版：平均分配）
-    int pointsPerRegion = nNet / nRegion;
-    for (int i = 0; i < nNet; i++) {
-        int regionID = min(i / pointsPerRegion, nRegion - 1);
-        spaceNet[i].regionID = regionID;
-        regions[regionID].netPointIndices.push_back(i);
+    // 建立 2D 網格結構：每個區域包含 4 個相鄰網點
+    // 網格點索引 k 映射到座標 (row, col) = (k / W, k % W)
+    // 區域 r 對應其左上角網點的座標
+    for (int r = 0; r < correctNRegion; r++) {
+        int row = r / (gridWidth - 1);
+        int col = r % (gridWidth - 1);
+        
+        // 一個區域包含 4 個點：左上、右上、左下、右下
+        int p1 = row * gridWidth + col;              // Top-Left
+        int p2 = row * gridWidth + (col + 1);        // Top-Right
+        int p3 = (row + 1) * gridWidth + col;        // Bottom-Left
+        int p4 = (row + 1) * gridWidth + (col + 1);  // Bottom-Right
+        
+        regions[r].netPointIndices = {p1, p2, p3, p4};
+        
+        // 注意：邊界網點會被多個區域共享
+        // 例如：網點 (1,1) 會同時屬於區域 (0,0), (0,1), (1,0), (1,1)
     }
+    
+    // 更新 nRegion 為正確值
+    nRegion = correctNRegion;
     
     // Step 10: Create an empty external archive A
     archive.clear();
@@ -193,6 +232,10 @@ void SNO::ExpectedValue() {
     };
     
     // Step 7-8: Calculate the expected value e_i by using Eq. (3.3)
+    // 計算動態權重 δ：從 2 線性遞減至 1
+    double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
+    double weight_delta = 2.0 - 1.0 * progress;  // 2.0 → 1.0 線性遞減
+    
     for (int i = 0; i < nRegion; i++) {
         Region& region = regions[i];
         
@@ -202,10 +245,10 @@ void SNO::ExpectedValue() {
         double normBest = normalize(region.rawBestValue, minBest, maxBest);
         
         // 根據公式 (3.3):
-        // e_i = c̃(v_{b,i}/n_{a,i}) + c̃(Σ(improvements)) + δ_i^1 · (1.0 - c̃(f(R_{i,p}^t)))
-        // 其中 δ_i^1 是權重參數，這裡使用 alpha
+        // e_i = c̃(v_{b,i}/n_{a,i}) + c̃(Σ(improvements)) + δ · (1.0 - c̃(f(R_{i,p}^t)))
+        // 其中 δ 是動態權重，從 2 遞減至 1（論文第44頁）
         
-        region.expectedValue = normVisit + normImprovement + alpha * (1.0 - normBest);
+        region.expectedValue = normVisit + normImprovement + weight_delta * (1.0 - normBest);
         
         // 確保期望值為正
         if (region.expectedValue < 0) region.expectedValue = 0.0;
@@ -226,10 +269,22 @@ void SNO::RegionSearch() {
     }
     sort(rankedRegions.begin(), rankedRegions.end(), greater<pair<double, int>>());
     
-    // 準備輪盤法的權重
-    vector<double> weights(nRegion);
-    for (int i = 0; i < nRegion; i++) {
-        weights[i] = regions[i].expectedValue;
+    // 計算本輪參與輪盤的區域數量（隨時間遞減）
+    // 論文第5頁：「每個迭代建立輪盤的區域數量會隨耗用評估次數增加而逐漸遞減」
+    // 採用非線性遞減：從 100% 緩慢遞減到 80%，確保前期充分探索
+    double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
+    // 使用平方根函數實現緩慢遞減：sqrt(progress) 比 progress 增長更慢
+    int nActiveRegions = static_cast<int>(nRegion * (1.0 - 0.2 * sqrt(progress)));
+    nActiveRegions = max(1, nActiveRegions);  // 至少保留1個區域
+    
+    // 只使用排名前 nActiveRegions 的區域建立輪盤
+    // 準備輪盤法的權重（只包含活躍區域）
+    vector<double> weights;
+    vector<int> activeRegionIDs;
+    for (int i = 0; i < nActiveRegions; i++) {
+        int regionID = rankedRegions[i].second;
+        weights.push_back(regions[regionID].expectedValue);
+        activeRegionIDs.push_back(regionID);
     }
     
     // Step 9: Create the table of successful parameter S^f and S^c
@@ -238,10 +293,14 @@ void SNO::RegionSearch() {
     
     // Step 2: for i = 1 to N(s) do
     for (size_t i = 0; i < explorers.size(); i++) {
+        // 檢查評估次數限制
+        if (currentEvaluations >= maxEvaluations) break;
         
         // Step 3: Using roulette wheel selection to select the region R_s
-        int selectedRegion = rouletteWheelSelection(weights);
-        Region& region = regions[selectedRegion];
+        // 從活躍區域中選擇（輪盤返回的是 weights 中的索引）
+        int selectedIdx = rouletteWheelSelection(weights);
+        int selectedRegionID = activeRegionIDs[selectedIdx];  // 映射回真實區域ID
+        Region& region = regions[selectedRegionID];
         
         // 標記該區域在本輪被訪問
         if (!region.visitedThisRound) {
@@ -257,17 +316,22 @@ void SNO::RegionSearch() {
         double c = normalRandom(region.meanC, 0.1);
         
         // 確保參數在合理範圍內
-        f = max(0.0, min(2.0, f));  // Cauchy 可能超過 1
+        // 論文第6頁：「若 f_i 大於 1 時，將直接設為 1」
+        f = max(0.0, min(1.0, f));
         c = max(0.0, min(1.0, c));
         
         // Step 6: Select the net point N_s by using Eq. (3.7)
         // N_s = { Tournament(R_s), if rand(0,1,u) < δ_{1,0}^{0,1}
         //       { R_{s,b},         otherwise
         NetPoint* selectedNet = nullptr;
-        double delta_1_0 = 0.1;  // Tournament 機率參數
+        
+        // 動態參數 δ_{1,0}^{0,1}：從 1.0 (前期) 線性遞減至 0.0 (後期)
+        // 論文：「在搜尋前期有較高的機率使用競賽選擇法...後期則有較高機率直接選擇區域中最好的」
+        double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
+        double delta_1_0 = 1.0 - progress;
         
         if (randDouble(0, 1) < delta_1_0) {
-            // Tournament selection: 從該區域隨機選取幾個網點，選最好的
+            // 前期機率高：使用競賽選擇 (維持多樣性)
             if (!region.netPointIndices.empty()) {
                 int tournamentSize = min(3, static_cast<int>(region.netPointIndices.size()));
                 int bestIdx = region.netPointIndices[randInt(0, region.netPointIndices.size() - 1)];
@@ -283,7 +347,7 @@ void SNO::RegionSearch() {
                 selectedNet = &spaceNet[bestIdx];
             }
         } else {
-            // 選擇該區域最好的網點 R_{s,b}
+            // 後期機率高：直接選最好的 (加速收斂)
             if (!region.netPointIndices.empty()) {
                 int bestIdx = region.netPointIndices[0];
                 double bestFit = spaceNet[bestIdx].fitness;
@@ -300,38 +364,33 @@ void SNO::RegionSearch() {
         
         // Step 7: Generate the new solution s_i' by using Eq. (3.8)
         Solution newSolution(dimension);
-        double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
         double F_r = progress;  // 進度比例
         
         if (selectedNet != nullptr) {
-            // s'_{i,j} = { N_{s,j} + f_i · (s^t_{i,j} - s^t_{r2,j}), if rand(0,1,u) < F_r^{α}
-            //           { s^t_{i,j} + f_i · (N_{s,j} - s^t_{r2,j}), otherwise
-            int r2 = randInt(0, explorers.size() - 1);
-            while (r2 == static_cast<int>(i) && explorers.size() > 1) {
-                r2 = randInt(0, explorers.size() - 1);
-            }
+            // 嚴格保證 r1 != r2 != i
+            int r1, r2;
+            do { r1 = randInt(0, explorers.size() - 1); } while (r1 == static_cast<int>(i) && explorers.size() > 1);
+            do { r2 = randInt(0, explorers.size() - 1); } while ((r2 == static_cast<int>(i) || r2 == r1) && explorers.size() > 2);
             
             double threshold = pow(F_r, alpha);
             
             for (int d = 0; d < dimension; d++) {
                 if (randDouble(0, 1) < threshold) {
-                    // 前期策略：以網點為中心
-                    // 前期策略：應使用隨機個體 r1
-                    int r1 = randInt(0, explorers.size() - 1);
-                    // 確保 r1 不等於 r2
+                    // 後期策略（Fr^α 大時機率高）：以網點為中心
                     newSolution.position[d] = selectedNet->position[d] + 
                         f * (explorers[r1].position[d] - explorers[r2].position[d]);
-                        
                 } else {
-                    // 後期策略：以當前解為中心
+                    // 前期策略（Fr^α 小時機率高）：以當前解為中心
                     newSolution.position[d] = explorers[i].position[d] + 
                         f * (selectedNet->position[d] - explorers[r2].position[d]);
                 }
             }
         } else {
             // 如果沒有可用的網點，使用隨機探索者
-            int r1 = randInt(0, explorers.size() - 1);
-            int r2 = randInt(0, explorers.size() - 1);
+            int r1, r2;
+            do { r1 = randInt(0, explorers.size() - 1); } while (r1 == static_cast<int>(i) && explorers.size() > 1);
+            do { r2 = randInt(0, explorers.size() - 1); } while ((r2 == static_cast<int>(i) || r2 == r1) && explorers.size() > 2);
+            
             for (int d = 0; d < dimension; d++) {
                 newSolution.position[d] = explorers[i].position[d] + 
                     f * (explorers[r1].position[d] - explorers[r2].position[d]);
@@ -441,6 +500,11 @@ void SNO::RegionSearch() {
             // 限制範圍
             region.meanF = max(0.1, min(1.0, region.meanF));
             region.meanC = max(0.1, min(1.0, region.meanC));
+            
+            // 【關鍵修正】：清空成功參數記錄，以便下一代重新收集
+            // 這確保參數自適應是基於當前世代的成功經驗，而非全局累積
+            region.successfulF.clear();
+            region.successfulC.clear();
         }
     }
 }
@@ -451,6 +515,8 @@ void SNO::PointSearch() {
     
     // Step 1: for i = 1 to N(x) do
     for (size_t i = 0; i < miners.size(); i++) {
+        // 檢查評估次數限制
+        if (currentEvaluations >= maxEvaluations) break;
         
         // Step 2: Rank all net points according to objective value
         vector<int> sortedIndices(nNet);
@@ -460,9 +526,13 @@ void SNO::PointSearch() {
              [this](int a, int b) { return spaceNet[a].fitness < spaceNet[b].fitness; });
         
         // Step 3: Select N_s from the top δ_{ρ_max}^{0,1} · N(N) of net points
-        int nTopPoints = max(1, static_cast<int>(nNet * rhoMax));
+        // 動態計算搜尋範圍比例：從 rhoMax 線性遞減到 0.05（最少保留5%最優網格點）
+        // 論文：「被搜尋的網格點比例會隨著已耗用評估次數增加而逐漸遞減」
+        double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
+        double currentRho = rhoMax * (1.0 - 0.95 * progress);  // rhoMax → 0.05*rhoMax
+        int nTopPoints = max(1, static_cast<int>(nNet * currentRho));
         
-        // 從前 ρ_max 比例的網格點中選擇一個
+        // 從前 currentRho 比例的網格點中選擇一個
         int selectedIdx = sortedIndices[randInt(0, nTopPoints - 1)];
         NetPoint& selectedNet = spaceNet[selectedIdx];
         
@@ -475,24 +545,18 @@ void SNO::PointSearch() {
         double c = normalRandom(region.meanC, 0.1);
         
         // 確保參數在合理範圍內
-        f = max(0.0, min(2.0, f));
+        // 論文第6頁：「若 f_i 大於 1 時，將直接設為 1」
+        f = max(0.0, min(1.0, f));
         c = max(0.0, min(1.0, c));
         
         // Step 6: Generate the new solution x'_θ by using Eq. (3.11)
         Solution newSolution(dimension);
-        double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
-        double F_r = progress;  // 進度比例
+        double F_r = progress;  // 進度比例（使用上面已計算的 progress）
         
-        // 隨機選擇兩個不同的開發者索引
-        int r1 = randInt(0, miners.size() - 1);
-        int r2 = randInt(0, miners.size() - 1);
-        while (r1 == static_cast<int>(i) && miners.size() > 1) {
-            r1 = randInt(0, miners.size() - 1);
-        }
-        while (r2 == static_cast<int>(i) || r2 == r1) {
-            r2 = randInt(0, miners.size() - 1);
-            if (miners.size() <= 2) break;  // 避免無限循環
-        }
+        // 嚴格保證 r1 != r2 != i
+        int r1, r2;
+        do { r1 = randInt(0, miners.size() - 1); } while (r1 == static_cast<int>(i) && miners.size() > 1);
+        do { r2 = randInt(0, miners.size() - 1); } while ((r2 == static_cast<int>(i) || r2 == r1) && miners.size() > 2);
         
         // Eq. (3.11):
         // x'_{θ,j} = { N_{s,j} + f_i · (x^t_{r1,j} - x^t_{r2,j}), if rand(0,1,u) < F_r^β
@@ -558,10 +622,17 @@ void SNO::NetAdjustment(const Solution& newSolution) {
     sort(distances.begin(), distances.end());
     
     // Step 2: Select the net points which need to be adjusted N_a
-    int nAdjust = min(nNA, nNet);
+    // 動態調整數量：從 1 (前期) 逐漸增加至 nNA (後期)
+    // 論文：「搜尋前期...網格點被吸引的數量較少...搜尋後期逐漸增加網格點被吸引的數量」
+    double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
+    int dynamic_nNA = 1 + static_cast<int>((nNA - 1) * progress);
+    int nAdjust = min(dynamic_nNA, nNet);
     
     // Step 3: for i = 1 to N(N_a) do
     for (int i = 0; i < nAdjust; i++) {
+        // 檢查評估次數限制
+        if (currentEvaluations >= maxEvaluations) break;
+        
         int netIdx = distances[i].second;
         NetPoint& currentNet = spaceNet[netIdx];
         
@@ -574,16 +645,18 @@ void SNO::NetAdjustment(const Solution& newSolution) {
         double c = normalRandom(region.meanC, 0.1);
         
         // 確保參數在合理範圍內
-        f = max(0.0, min(2.0, f));
+        // 論文第6頁：「若 f_i 大於 1 時，將直接設為 1」
+        f = max(0.0, min(1.0, f));
         c = max(0.0, min(1.0, c));
         
-        // 隨機選擇兩個探索者或開發者索引
+        // 嚴格保證 r1 != r2
         int r1 = -1, r2 = -1;
         if (explorers.size() > 0) {
             r1 = randInt(0, explorers.size() - 1);
-            r2 = randInt(0, explorers.size() - 1);
-            while (r2 == r1 && explorers.size() > 1) {
-                r2 = randInt(0, explorers.size() - 1);
+            if (explorers.size() > 1) {
+                do { r2 = randInt(0, explorers.size() - 1); } while (r2 == r1);
+            } else {
+                r2 = r1; // 只有一個探索者時無法避免
             }
         }
         
@@ -622,7 +695,8 @@ void SNO::NetAdjustment(const Solution& newSolution) {
         temp2.fitness = evaluate(temp2.position);
         
         // Step 8: Select N'_{a,i} by using Eq. (3.14)
-        // D 函數：選擇與 z' 距離最近的個體
+        // D 函數：從 temp1 和 temp2 中選擇距離參考點最近的
+        // 【關鍵修正】：絕對不能將參考點本身納入候選，否則距離永遠為0
         NetPoint selectedNet(dimension);
         double progress = static_cast<double>(currentEvaluations) / maxEvaluations;
         double F_r = progress;
@@ -638,37 +712,30 @@ void SNO::NetAdjustment(const Solution& newSolution) {
         };
         
         if (i == 0) {
-            // N'_{a,i} = z', if i = 1
+            // 只有排第一的點 (i=0) 直接變成 z'
             selectedNet.position = z_prime.position;
             selectedNet.fitness = z_prime.fitness;
         } else if (randDouble(0, 1) < F_r) {
-            // N'_{a,i} = D(N^1_{a,i}, N^2_{a,i}, z'), if i ≠ 1 and rand(0,1,u) < F_r
-            // 後期：選擇與 z' 距離最近的（向搜尋歷史解收斂）
+            // 後期策略：選擇 temp1 或 temp2 中，距離 z' 較近的那一個
+            // D(N^1_{a,i}, N^2_{a,i}, z') = 從 temp1, temp2 選擇距離 z' 最近的
             double dist1 = calcDistance(temp1.position, z_prime.position);
             double dist2 = calcDistance(temp2.position, z_prime.position);
-            double dist3 = 0.0;  // z' 與自己距離為 0
             
-            if (dist1 <= dist2 && dist1 <= dist3) {
+            if (dist1 < dist2) {
                 selectedNet = temp1;
-            } else if (dist2 <= dist1 && dist2 <= dist3) {
-                selectedNet = temp2;
             } else {
-                selectedNet.position = z_prime.position;
-                selectedNet.fitness = z_prime.fitness;
+                selectedNet = temp2;
             }
         } else {
-            // N'_{a,i} = D(N^1_{a,i}, N^2_{a,i}, N_{a,i}), otherwise
-            // 前期：選擇與原網格點 N_a 距離最近的（保持多樣性）
+            // 前期策略：選擇 temp1 或 temp2 中，距離原網點 (currentNet) 較近的那一個
+            // D(N^1_{a,i}, N^2_{a,i}, N_{a,i}) = 從 temp1, temp2 選擇距離 currentNet 最近的
             double dist1 = calcDistance(temp1.position, currentNet.position);
             double dist2 = calcDistance(temp2.position, currentNet.position);
-            double dist3 = 0.0;  // N_a 與自己距離為 0
             
-            if (dist1 <= dist2 && dist1 <= dist3) {
+            if (dist1 < dist2) {
                 selectedNet = temp1;
-            } else if (dist2 <= dist1 && dist2 <= dist3) {
-                selectedNet = temp2;
             } else {
-                selectedNet = currentNet;
+                selectedNet = temp2;
             }
         }
         
@@ -729,7 +796,7 @@ void SNO::PopulationAdjustment() {
     
     // Step 4-9: for i = 1 to (N(N) - |x|) do
     // 如果需要增加開發者數量
-    while (miners.size() < static_cast<size_t>(nMinersTarget)) {
+    while (miners.size() < static_cast<size_t>(nMinersTarget) && currentEvaluations < maxEvaluations) {
         
         // Step 5: Randomly select N_s from the top ρ_max^{0,1} · N(N) of net points
         // 先對網點按適應值排序
@@ -784,6 +851,13 @@ void SNO::PopulationAdjustment() {
 double SNO::evaluate(const vector<double>& position) {
     currentEvaluations++;
     
+    // 每100次評估輸出一次進度
+    if (currentEvaluations % 100 == 0) {
+        cout << "\r  [" << currentEvaluations << "/" << maxEvaluations 
+             << "] Best: " << scientific << setprecision(6) << bestSolution.fitness 
+             << flush;
+    }
+    
     // 呼叫 CEC21 測試函數，傳遞變形選項
     return TestFunction::evaluate(functionName, position, dimension, useBias, useShift, useRotation);
 }
@@ -796,8 +870,16 @@ void SNO::updateBest(const Solution& sol) {
 
 void SNO::boundCheck(vector<double>& position) {
     for (int d = 0; d < dimension; d++) {
-        if (position[d] < lowerBound[d]) position[d] = lowerBound[d];
-        if (position[d] > upperBound[d]) position[d] = upperBound[d];
+        if (position[d] < lowerBound[d]) {
+            // 反射法：超出下界則反彈
+            position[d] = lowerBound[d] + (lowerBound[d] - position[d]);
+            // 如果反彈後還是超出上界（極端情況），則強制設為邊界
+            if (position[d] > upperBound[d]) position[d] = upperBound[d];
+        } else if (position[d] > upperBound[d]) {
+            // 反射法：超出上界則反彈
+            position[d] = upperBound[d] - (position[d] - upperBound[d]);
+            if (position[d] < lowerBound[d]) position[d] = lowerBound[d];
+        }
     }
 }
 

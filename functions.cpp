@@ -17,6 +17,23 @@ int getFunctionNumber(const std::string& funcName) {
     return 1; // 預設
 }
 
+// CEC21 函數編號轉名稱
+std::string getFunctionName(int funcNum) {
+    switch(funcNum) {
+        case 1: return "BentCigar";
+        case 2: return "Schwefel";
+        case 3: return "BiRastrigin";
+        case 4: return "GrieRosen";
+        case 5: return "Hybrid1";
+        case 6: return "Hybrid2";
+        case 7: return "Hybrid3";
+        case 8: return "Composition1";
+        case 9: return "Composition2";
+        case 10: return "Composition3";
+        default: return "BentCigar";
+    }
+}
+
 double TestFunction::evaluate(const std::string& funcName, const std::vector<double>& x, int dimension,
                              bool useBias, bool useShift, bool useRotation) {
     int funcNum = getFunctionNumber(funcName);

@@ -24,10 +24,10 @@ struct Solution {
 struct NetPoint {
     vector<double> position;      // 網格點位置
     double fitness;               // 目標函數值
-    int regionID;                 // 所屬區域ID
+    // 注意：不再儲存 regionID，因為一個網點可屬於多個區域（共享資訊）
     
-    NetPoint() : fitness(1e100), regionID(-1) {}
-    NetPoint(int dim) : position(dim, 0.0), fitness(1e100), regionID(-1) {}
+    NetPoint() : fitness(1e100) {}
+    NetPoint(int dim) : position(dim, 0.0), fitness(1e100) {}
 };
 
 // 區域資訊結構

@@ -17,6 +17,8 @@ extern "C" {
 }
 
 // 函數名稱對應
+std::string getFunctionName(int funcNum);
+
 class TestFunction {
 public:
     static double evaluate(const std::string& funcName, const std::vector<double>& x, int dimension,
